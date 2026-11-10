@@ -215,7 +215,11 @@ install_deps() {
 
 install_binary() {
   info "Устанавливаю traffic-guard…"
-  curl -fsSL "$TG_INSTALLER" | bash </dev/null || die "Не удалось установить traffic-guard."
+  local tmp; tmp="$(mktemp /tmp/tg-install.XXXXXX.sh)" || die "mktemp failed"
+  curl -fsSL "$TG_INSTALLER" -o "$tmp" || { rm -f "$tmp"; die "Не удалось скачать установщик traffic-guard."; }
+  bash "$tmp" </dev/null; local rc=$?
+  rm -f "$tmp"
+  [ "$rc" -eq 0 ] || die "Установщик traffic-guard завершился с ошибкой (код $rc)."
   [ -n "$(tg_bin)" ] || die "traffic-guard не найден после установки."
   ok "traffic-guard: $("$(tg_bin)" --version 2>/dev/null | head -n1)"
 }
@@ -315,8 +319,8 @@ cmd_install() {
   for e in "${EXTRA_ALLOW[@]}"; do whitelist_add "$e" && ok "В белый список: $e"; done
 
   install_deps
-  install_binary
   install_manager
+  install_binary
   cmd_apply
   install_units
 
