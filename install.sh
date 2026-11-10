@@ -110,14 +110,31 @@ build_urls() {
 list_entries() { [ -f "$1" ] && grep -vE '^\s*(#|$)' "$1" | awk '{print $1}'; }
 
 # --- SSH-защита: IP текущего SSH-клиента ---
+# Печатает один или несколько IP (по одному в строке).
 detect_ssh_ip() {
-  local ip=""
-  if [ -n "${SSH_CLIENT:-}" ]; then ip="${SSH_CLIENT%% *}"
-  elif [ -n "${SSH_CONNECTION:-}" ]; then ip="${SSH_CONNECTION%% *}"
-  else ip="$(who -m 2>/dev/null | sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n1)"
+  local ip="" pid v
+  # 1) переменные окружения текущего процесса
+  ip="${SSH_CLIENT:-${SSH_CONNECTION:-}}"; ip="${ip%% *}"
+  # 2) sudo вычищает SSH_CLIENT — ищем его у родительских процессов
+  if [ -z "$ip" ] && [ -d /proc ]; then
+    pid=$$
+    while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+      v="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | sed -n 's/^SSH_\(CLIENT\|CONNECTION\)=//p' | head -n1)"
+      [ -n "$v" ] && { ip="${v%% *}"; break; }
+      pid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    done
+  fi
+  # 3) who -m по управляющему терминалу
+  if [ -z "$ip" ] && has_tty; then
+    ip="$(who -m </dev/tty 2>/dev/null | sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n1)"
   fi
   ip="${ip#::ffff:}"
-  valid_addr "$ip" && echo "$ip"
+  if valid_addr "$ip"; then echo "$ip"; return 0; fi
+  # 4) все активные SSH-соединения (sshd / sshd-session)
+  have ss || return 0
+  ss -Htnp state established 2>/dev/null | awk '/"sshd/ {print $4}' \
+    | sed -E 's/:[0-9]+$//; s/^\[//; s/\]$//; s/^::ffff://' | sort -u \
+    | while read -r v; do valid_addr "$v" && echo "$v"; done
 }
 
 whitelist_add() {
@@ -287,13 +304,15 @@ cmd_install() {
 
   save_conf
 
-  local sship; sship="$(detect_ssh_ip)"
+  local sship e; sship="$(detect_ssh_ip)"
   if [ -n "$sship" ]; then
-    whitelist_add "$sship" && ok "Ваш текущий SSH-IP $sship добавлен в белый список."
+    for e in $sship; do
+      whitelist_add "$e" && ok "SSH-IP $e добавлен в белый список."
+    done
   else
     warn "Не удалось определить IP SSH-клиента. Добавьте его вручную: tgctl allow <IP>"
   fi
-  local e; for e in "${EXTRA_ALLOW[@]}"; do whitelist_add "$e" && ok "В белый список: $e"; done
+  for e in "${EXTRA_ALLOW[@]}"; do whitelist_add "$e" && ok "В белый список: $e"; done
 
   install_deps
   install_binary
